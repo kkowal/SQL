@@ -9,10 +9,10 @@ CREATE SCHEMA projet;
 -- Création de la table utilisateurs
 CREATE TABLE projet.utilisateurs ( 
 	login VARCHAR(50) PRIMARY KEY,
-	email VARCHAR(100) NOT NULL UNIQUE,
+	email VARCHAR(100) NOT NULL UNIQUE (email <> ''),
 	nom VARCHAR(100) NOT NULL CHECK (nom <> ''),
 	prenom VARCHAR(100) NOT NULL CHECK(prenom <> ''),
-	mdp VARCHAR(100) NOT NULL,
+	mdp VARCHAR(100) NOT NULL (mdp <> ''),
 	nb_obj_vendus INTEGER NOT NULL DEFAULT 0,
 	etat_user VARCHAR(15) CHECK(etat_user = 'actif' OR etat_user = 'suspendu' OR etat_user = 'supprimé') DEFAULT 'actif',
 	derniere_eval INTEGER NULL,
@@ -23,7 +23,7 @@ CREATE TABLE projet.utilisateurs (
 -- Création de la table objets
 CREATE TABLE projet.objets (
 	id_objet SERIAL PRIMARY KEY,
-	description VARCHAR(1000) NOT NULL,
+	description VARCHAR(1000) NOT NULL (description <> ''),
 	prix_depart INTEGER NOT NULL CHECK(prix_depart > 0),
 	date_debut TIMESTAMP NOT NULL DEFAULT now(),
 	date_fin TIMESTAMP NOT NULL CHECK (date_fin >= now())DEFAULT now() + INTERVAL '15 days',
@@ -71,12 +71,6 @@ DECLARE
 	mdp ALIAS FOR $5;
 
 BEGIN 
-	IF
-		EXISTS (SELECT u.* 
-			FROM projet.utilisateurs u
-			WHERE u.login = login_user OR u.email = email_user) THEN 
-		RAISE 'Ce login ou ce mail existe déjà!';
-	END IF;
 
 	INSERT INTO projet.utilisateurs VALUES
 		(login_user, email_user, nom, prenom, mdp, DEFAULT, DEFAULT, NULL, NULL, DEFAULT);
@@ -92,12 +86,6 @@ DECLARE
 	vendeur ALIAS FOR $4;
 
 BEGIN
-	IF 
-		NOT EXISTS (SELECT u.*
-			FROM projet.utilisateurs u
-			WHERE u.login = vendeur) THEN
-		RAISE 'L utilisateur n existe pas!';
-	END IF;
 
 	IF 
 		(date_fin IS NULL)
@@ -215,33 +203,19 @@ $$LANGUAGE plpgsql;
 CREATE FUNCTION projet.transactionTrigger() RETURNS TRIGGER AS $$
 DECLARE
 BEGIN
+	
 	IF
-		NOT EXISTS (SELECT e.*
-			    FROM projet.encheres e
-			    WHERE e.id_enchere = NEW.enchere) THEN
-		RAISE 'Cette enchère n existe pas!';
-	ELSE
-		IF
-			'meilleure enchère' != (SELECT e.etat
-					FROM projet.encheres e
-					WHERE e.id_enchere = NEW.enchere) THEN
-			RAISE 'Cette enchère n a pas gagné l enchère!';
-		END IF;
-			
+		'meilleure enchère' != (SELECT e.etat
+				FROM projet.encheres e
+				WHERE e.id_enchere = NEW.enchere) THEN
+		RAISE 'Cette enchère n a pas gagné l enchère!';
 	END IF;
 
 	IF
-		NOT EXISTS (SELECT o.*
-			    FROM projet.objets o
-			    WHERE o.id_objet = NEW.objet) THEN
-		RAISE 'Cet objet n existe pas!';
-	ELSE	
-		IF
-			'en vente' != (SELECT o.etat
-				FROM projet.objets o
-				WHERE o.id_objet = NEW.objet) THEN
-			RAISE 'L objet ne peut pas être vendu! La transaction est annulée!';
-		END IF;
+		'en vente' != (SELECT o.etat
+			FROM projet.objets o
+			WHERE o.id_objet = NEW.objet) THEN
+		RAISE 'L objet ne peut pas être vendu! La transaction est annulée!';
 	END IF;
 
 	-- Mettre à jour l'état de l'enchère
@@ -273,18 +247,6 @@ BEGIN
 			      FROM projet.utilisateurs u
 			      WHERE login = NEW.acheteur) THEN
 		RAISE 'Votre compte a été suspendu!';
-	END IF;
-	IF 
-		NOT EXISTS (SELECT o.*
-				FROM projet.objets o
-				WHERE o.id_objet = NEW.objet) THEN
-		RAISE 'L objet n existe pas!';
-	END IF;
-	IF 
-		NOT EXISTS (SELECT u.*
-				FROM projet.utilisateurs u
-				WHERE u.login = NEW.acheteur) THEN
-		RAISE 'L utlisateur n existe pas!';
 	END IF;
 	
 	IF
