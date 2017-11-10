@@ -2,6 +2,10 @@
 
 CREATE SCHEMA projet;
 
+		----------------------------
+		-------CREATION TABLE-------
+		----------------------------
+		
 -- Création de la table utilisateurs
 CREATE TABLE projet.utilisateurs ( 
 	login VARCHAR(50) PRIMARY KEY,
@@ -51,6 +55,10 @@ CREATE TABLE projet.evaluations (
 	CONSTRAINT eval_key PRIMARY KEY (id_transaction, user_evaluer)
 );
 
+		----------------------------
+		-----CREATION FONCTION------
+		----------------------------	
+		
 -- Fonction qui permet la création d'un utilisateur
 CREATE OR REPLACE FUNCTION projet.creerUtilisateur(VARCHAR(50),VARCHAR(100), VARCHAR(100), VARCHAR(100),
 	VARCHAR(100)) RETURNS VOID AS $$
@@ -108,75 +116,37 @@ DECLARE
 	acheteur ALIAS FOR $3;
 
 BEGIN 
-	IF 
-		NOT EXISTS (SELECT o.*
-				FROM projet.objets o
-				WHERE o.id_objet = objet) THEN
-		RAISE 'L objet n existe pas!';
-	END IF;
-	
-	IF
-		'en vente' != (SELECT o.etat
-				FROM projet.objets o
-				WHERE o.id_objet = objet) THEN
-		RAISE 'Cet objet n est pas en vente!';
-	END IF;
-
-	IF 
-		NOT EXISTS (SELECT u.*
-				FROM projet.utilisateurs u
-				WHERE u.login = acheteur) THEN
-		RAISE 'L utlisateur n existe pas!';
-	END IF;
 
 	INSERT INTO projet.encheres VALUES (DEFAULT, 'meilleure enchère', prix, objet, acheteur);
 
 END;
 $$ LANGUAGE plpgsql;
 
--- Trigger qui permet de vérifier si pour l'enchère créée, l'objet est bien en vente, si le prix est plus petit grand que le prix de départ
--- ou si le prix est plus grand que le prix de la meilleure enchère pour cet objet
-CREATE FUNCTION projet.enchereTrigger() RETURNS TRIGGER AS $$
-DECLARE
-
-BEGIN 
-	IF
-		'en vente' != (SELECT o.etat
-				FROM projet.objets o
-				WHERE o.id_objet = NEW.objet) THEN 
-			RAISE 'Ce produit n est plus en vente!';
-	ELSE
-		IF
-			0 =  (SELECT count(e.*)
-			    FROM projet.encheres e
-			    WHERE e.objet = NEW.objet) THEN
-			IF
-					NEW.prix < (SELECT o.prix_depart
-						    FROM projet.objets o
-						    WHERE o.id_objet = NEW.objet) THEN
-					RAISE 'Le prix n est pas plus grand que le prix de  départ!';
-			END IF;
-		ELSE 
-			IF
-				NEW.prix > (SELECT MAX(e.prix)
-				    FROM projet.encheres e
-				    WHERE e.objet = NEW.objet AND e.id_enchere != NEW.id_enchere) THEN
-				UPDATE projet.encheres 
-				SET etat = 'enchère perdante'
-				WHERE objet = NEW.objet AND id_enchere != NEW.id_enchere;
-			ELSE 
-				RAISE 'Le prix n est pas plus grand que le prix de l ancienne enchère!';
-			END IF;
-		END IF;
-	END IF;
+-- Fonction qui permet de créer une nouvelle transaction
+CREATE OR REPLACE FUNCTION projet.creerTransaction(INTEGER, INTEGER) RETURNS VOID AS $$
+DECLARE 
+	enchere ALIAS FOR $1;
+	objet ALIAS FOR $2;
+	login_vendeur VARCHAR(50);
+BEGIN
 	
-	RETURN NEW;
+	INSERT INTO projet.transactions VALUES (enchere, objet);
+	
+	SELECT vendeur
+	FROM projet.objets
+	WHERE id_objet = objet INTO login_vendeur;
+
+	UPDATE projet.utilisateurs
+	SET nb_obj_vendus = nb_obj_vendus + 1
+	WHERE login = login_vendeur;
+	
 END;
-$$ LANGUAGE plpgsql;
+$$LANGUAGE plpgsql;
 
-CREATE TRIGGER trigger_enchere BEFORE INSERT ON projet.encheres 
-	FOR EACH ROW EXECUTE PROCEDURE projet.enchereTrigger();
-
+		----------------------------
+		-------MODIFICATION---------
+		----------------------------
+		
 -- Fonction qui permet de faire la modification de l'objet	
 CREATE OR REPLACE FUNCTION projet.modifierObjet(INTEGER, VARCHAR(50), INTEGER, VARCHAR(1000), TIMESTAMP) RETURNS VOID AS $$
 DECLARE
@@ -200,17 +170,30 @@ BEGIN
 		WHERE id_objet = objet AND vendeur = proprio INTO n_description;
 	END IF; 
 	IF
-		(n_date_fin IS NULL) THEN
-		SELECT date_debut
-		FROM projet.objets 
-		WHERE id_objet = objet AND vendeur = proprio INTO n_date_fin;
+		(n_date_fin IS NOT NULL) THEN
+		UPDATE projet.objets
+		SET prix_depart = n_prix, description = n_description, date_fin = n_date_fin
+		WHERE id_objet = objet AND vendeur = proprio;
+	ELSE
+		IF 
+			(n_date_fin IS NULL) THEN
+			SELECT date_debut
+			FROM projet.objets 
+			WHERE id_objet = objet AND vendeur = proprio INTO n_date_fin;
+			n_date_fin = n_date_fin + INTERVAL '15 days';
+			UPDATE projet.objets
+			SET prix_depart = n_prix, description = n_description, date_fin = n_date_fin
+			WHERE id_objet = objet AND vendeur = proprio;
+		END IF;
 	END IF; 
-	n_date_fin = n_date_fin + INTERVAL '15 days';
-	UPDATE projet.objets
-	SET prix_depart = n_prix, description = n_description, date_fin = n_date_fin
-	WHERE id_objet = objet AND vendeur = proprio;
+	
 END;
 $$LANGUAGE plpgsql;
+
+
+		----------------------------
+		----------TRIGGER-----------
+		----------------------------	
 
 -- Trigger qui permet de vérifier s'il est possible de modifier un objet. 
 -- Si une enchère existe pour un objet alors, impossible de le modifier. 
@@ -221,33 +204,165 @@ BEGIN
 	IF
 		EXISTS (SELECT e.*
 			FROM projet.encheres e
-			WHERE e.objet = NEW.id_objet) THEN
+			WHERE e.objet = NEW.id_objet AND (e.etat != 'enchère remportée' AND e.etat != 'enchère perdue')) THEN
 		RAISE 'Une enchère existe! Impossible de modifier cet objet!';
 	END IF;
 	RETURN NEW;
 END;
 $$LANGUAGE plpgsql;
 
+-- Trigger qui permet de vérifier si une transaction peut être réalisée
+CREATE FUNCTION projet.transactionTrigger() RETURNS TRIGGER AS $$
+DECLARE
+BEGIN
+	IF
+		NOT EXISTS (SELECT e.*
+			    FROM projet.encheres e
+			    WHERE e.id_enchere = NEW.enchere) THEN
+		RAISE 'Cette enchère n existe pas!';
+	ELSE
+		IF
+			'meilleure enchère' != (SELECT e.etat
+					FROM projet.encheres e
+					WHERE e.id_enchere = NEW.enchere) THEN
+			RAISE 'Cette enchère n a pas gagné l enchère!';
+		END IF;
+			
+	END IF;
+
+	IF
+		NOT EXISTS (SELECT o.*
+			    FROM projet.objets o
+			    WHERE o.id_objet = NEW.objet) THEN
+		RAISE 'Cet objet n existe pas!';
+	ELSE	
+		IF
+			'en vente' != (SELECT o.etat
+				FROM projet.objets o
+				WHERE o.id_objet = NEW.objet) THEN
+			RAISE 'L objet ne peut pas être vendu! La transaction est annulée!';
+		END IF;
+	END IF;
+
+	-- Mettre à jour l'état de l'enchère
+		UPDATE projet.encheres
+		SET etat = 'enchère remportée'
+		WHERE id_enchere = NEW.enchere;
+
+		UPDATE projet.encheres
+		SET etat = 'enchère perdue'
+		WHERE id_enchere != NEW.enchere AND objet = NEW.objet;
+
+	-- Mettre à jour l'état de l'objet
+		UPDATE projet.objets
+		SET etat = 'vendu'
+		WHERE id_objet = NEW.objet;
+	RETURN NEW;
+END;
+$$LANGUAGE plpgsql;
+
+
+-- Trigger qui permet de vérifier si pour l'enchère créée, l'objet est bien en vente, si le prix est plus petit grand que le prix de départ
+-- ou si le prix est plus grand que le prix de la meilleure enchère pour cet objet
+CREATE FUNCTION projet.enchereTrigger() RETURNS TRIGGER AS $$
+DECLARE
+
+BEGIN 
+	IF
+		'suspendu' = (SELECT u.etat_user
+			      FROM projet.utilisateurs u
+			      WHERE login = NEW.acheteur) THEN
+		RAISE 'Votre compte a été suspendu!';
+	END IF;
+	IF 
+		NOT EXISTS (SELECT o.*
+				FROM projet.objets o
+				WHERE o.id_objet = NEW.objet) THEN
+		RAISE 'L objet n existe pas!';
+	END IF;
+	IF 
+		NOT EXISTS (SELECT u.*
+				FROM projet.utilisateurs u
+				WHERE u.login = NEW.acheteur) THEN
+		RAISE 'L utlisateur n existe pas!';
+	END IF;
+	
+	IF
+		NEW.acheteur = (SELECT o.vendeur
+				FROM projet.objets o
+				WHERE o.id_objet = NEW.objet) THEN
+		RAISE 'L acheteur ne peut pas être le vendeur!';
+
+	ELSE
+		IF
+			'en vente' != (SELECT o.etat
+				FROM projet.objets o
+				WHERE o.id_objet = NEW.objet) THEN 
+			RAISE 'Ce produit n est plus en vente!';
+		END IF;
+	END IF;
+	IF
+		0 =  (SELECT count(e.*)
+		      FROM projet.encheres e
+		      WHERE e.objet = NEW.objet) THEN
+		IF
+				NEW.prix < (SELECT o.prix_depart
+					    FROM projet.objets o
+					    WHERE o.id_objet = NEW.objet) THEN
+				RAISE 'Le prix n est pas plus grand que le prix de  départ!';
+		END IF;
+	ELSE 
+		IF
+				NEW.prix > (SELECT MAX(e.prix)
+				    FROM projet.encheres e
+				    WHERE e.objet = NEW.objet AND e.id_enchere != NEW.id_enchere) THEN
+				UPDATE projet.encheres 
+				SET etat = 'enchère perdante'
+				WHERE objet = NEW.objet AND id_enchere != NEW.id_enchere;
+		ELSE 
+				RAISE 'Le prix n est pas plus grand que le prix de l ancienne enchère!';
+		END IF;
+	END IF;
+	
+	RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+		----------------------------
+		------APPEL TRIGGER---------
+		----------------------------
+		
+CREATE TRIGGER trigger_enchere BEFORE INSERT ON projet.encheres 
+	FOR EACH ROW EXECUTE PROCEDURE projet.enchereTrigger();
+
+
+CREATE TRIGGER transTrigger BEFORE INSERT ON projet.transactions
+	FOR EACH ROW EXECUTE PROCEDURE projet.transactionTrigger();
+
 CREATE TRIGGER modObjTrigger BEFORE UPDATE on projet.objets
 	FOR EACH ROW EXECUTE PROCEDURE projet.modificationObjetTrigger();
+	
+		----------------------------
+		-----------TESTS------------
+		----------------------------
 
-SELECT projet.creerUtilisateur('Kamil', 'kamilkowal03@gmail.com', 'Kamil', 'Kowalczyk', 'k');
-SELECT projet.creerObjet('Canapés', 200, null,'Kamil');
-SELECT projet.creerObjet('Livre', 50, null,'john');
-SELECT projet.creerObjet('Jeux', 40, null, 'd');
+SELECT projet.creerUtilisateur('A', 'A', 'A', 'A', 'A');
+SELECT projet.creerUtilisateur('B', 'B', 'B', 'B', 'B');
+SELECT projet.creerUtilisateur('C', 'C', 'C', 'C', 'C');
 
-SELECT projet.modifierObjet(4, 'd', 0, 'B', '10/05/2018');
+SELECT projet.creerObjet('Livres', 100, null, 'A');
+SELECT projet.creerObjet('Jeux', 250, null, 'A');
+SELECT projet.creerObjet('Canapés', 500, null, 'C');
 
+SELECT projet.creerEnchere(120, 1, 'B');
+SELECT projet.creerEnchere(130, 1, 'C');
+SELECT projet.creerEnchere(150, 1, 'B');
+SELECT projet.creerEnchere(550, 2, 'C');
+SELECT projet.creerEnchere(600, 2, 'B');
 
-SELECT projet.creerEnchere(200, '1', 'john');
-SELECT projet.creerEnchere(350, '1', 'd');
-SELECT projet.creerEnchere(400, '1', 'c');
-SELECT projet.creerEnchere(500, '1', 'john');
-SELECT projet.creerEnchere(50, '2', 'Kamil');
-SELECT projet.creerEnchere(60, '2', 'Kamil');
+SELECT projet.creerTransaction(3, 1);
+SELECT projet.creerTransaction(5, 2);
 
-SELECT projet.modifierObjet(1, 'Kamil', 100, null, null);
---SELECT projet.creerEnchere(160, '1', 'john');
-
+SELECT projet.modifierObjet(3, 'C', 50, null, null);
 
 	
