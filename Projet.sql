@@ -9,10 +9,10 @@ CREATE SCHEMA projet;
 -- Création de la table utilisateurs
 CREATE TABLE projet.utilisateurs ( 
 	login VARCHAR(50) PRIMARY KEY,
-	email VARCHAR(100) NOT NULL UNIQUE (email <> ''),
+	email VARCHAR(100) NOT NULL UNIQUE CHECK (email <> ''),
 	nom VARCHAR(100) NOT NULL CHECK (nom <> ''),
-	prenom VARCHAR(100) NOT NULL CHECK(prenom <> ''),
-	mdp VARCHAR(100) NOT NULL (mdp <> ''),
+	prenom VARCHAR(100) NOT NULL CHECK (prenom <> ''),
+	mdp VARCHAR(100) NOT NULL CHECK (mdp <> ''),
 	nb_obj_vendus INTEGER NOT NULL DEFAULT 0,
 	etat_user VARCHAR(15) CHECK(etat_user = 'actif' OR etat_user = 'suspendu' OR etat_user = 'supprimé') DEFAULT 'actif',
 	derniere_eval INTEGER NULL,
@@ -23,7 +23,7 @@ CREATE TABLE projet.utilisateurs (
 -- Création de la table objets
 CREATE TABLE projet.objets (
 	id_objet SERIAL PRIMARY KEY,
-	description VARCHAR(1000) NOT NULL (description <> ''),
+	description VARCHAR(1000) NOT NULL CHECK (description <> ''),
 	prix_depart INTEGER NOT NULL CHECK(prix_depart > 0),
 	date_debut TIMESTAMP NOT NULL DEFAULT now(),
 	date_fin TIMESTAMP NOT NULL CHECK (date_fin >= now())DEFAULT now() + INTERVAL '15 days',
@@ -131,6 +131,20 @@ BEGIN
 END;
 $$LANGUAGE plpgsql;
 
+-- Fonction qui permet d'émettre une évaluation à un utilisateur
+CREATE OR REPLACE FUNCTION projet.creerEvaluation(INTEGER, VARCHAR(500), INTEGER, VARCHAR(20)) RETURNS VOID AS $$
+
+DECLARE
+	note ALIAS FOR $1;
+	com ALIAS FOR $2;
+	trans ALIAS FOR $3;
+	utilisateur ALIAS FOR $4;
+
+BEGIN
+	INSERT INTO projet.evaluations VALUES (note, com, trans, utilisateur);
+END;
+$$LANGUAGE plpgsql;
+
 		----------------------------
 		-------MODIFICATION---------
 		----------------------------
@@ -178,6 +192,26 @@ BEGIN
 END;
 $$LANGUAGE plpgsql;
 
+-- Fonction qui permet à l'admin de modifier l'état de l'utilisateur s'il est suspendu
+-- Donc le rendre en actif ou le supprimer
+CREATE OR REPLACE FUNCTION projet.modifierEtatUser(VARCHAR(50), VARCHAR(20)) RETURNS VOID AS $$
+
+DECLARE
+	login_user ALIAS FOR $1;
+	etat ALIAS FOR $2;
+
+BEGIN
+	IF
+		'suspendu' = (SELECT u.etat_user
+				FROM projet.utilisateurs u
+				WHERE u.login = login_user) THEN
+		UPDATE projet.utilisateurs
+		SET etat_user = etat
+		WHERE login = login_user;
+	END IF;
+END;
+$$LANGUAGE plpgsql;
+
 
 		----------------------------
 		----------TRIGGER-----------
@@ -192,7 +226,7 @@ BEGIN
 	IF
 		EXISTS (SELECT e.*
 			FROM projet.encheres e
-			WHERE e.objet = NEW.id_objet AND (e.etat != 'enchère remportée' AND e.etat != 'enchère perdue')) THEN
+			WHERE e.objet = NEW.id_objet AND (e.etat != 'enchère remportée' AND e.etat != 'enchère perdue' AND e.etat != 'enchère annulée')) THEN
 		RAISE 'Une enchère existe! Impossible de modifier cet objet!';
 	END IF;
 	RETURN NEW;
@@ -243,8 +277,8 @@ DECLARE
 
 BEGIN 
 	IF
-		'suspendu' = (SELECT u.etat_user
-			      FROM projet.utilisateurs u
+		'suspendu' = (SELECT etat_user
+			      FROM projet.utilisateurs
 			      WHERE login = NEW.acheteur) THEN
 		RAISE 'Votre compte a été suspendu!';
 	END IF;
@@ -290,6 +324,68 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Trgger qui permet de faire la moyenne d'un utilisateur et de modifier son état et l'état de ses objets et/ou enchères
+CREATE FUNCTION projet.creerEvalTrigger() RETURNS TRIGGER AS $$
+DECLARE 
+	nb_eval INTEGER;
+	nb_eval_bis INTEGER;
+	derniere_evaluation INTEGER;
+	moyenne NUMERIC;
+	tab_objet RECORD;
+	
+BEGIN 
+	SELECT u.nb_eval_total
+	FROM projet.utilisateurs u
+	WHERE u.login = NEW.user_evaluer INTO nb_eval;
+
+	SELECT u.eval_moyenne
+	FROM projet.utilisateurs u
+	WHERE u.login = NEW.user_evaluer INTO moyenne;
+
+	SELECT u.derniere_eval
+	FROM projet.utilisateurs u
+	WHERE u.login = NEW.user_evaluer INTO derniere_evaluation;
+
+	nb_eval_bis = nb_eval + 1;
+	IF 
+		(moyenne IS NULL) THEN
+			moyenne = NEW.note_evaluation;
+	ELSE 
+		moyenne = moyenne * nb_eval;
+		moyenne = moyenne + NEW.note_evaluation;
+		moyenne = moyenne / nb_eval_bis;
+	END IF;
+		
+	UPDATE projet.utilisateurs
+	SET derniere_eval = NEW.note_evaluation, eval_moyenne = moyenne, nb_eval_total = nb_eval_bis
+	WHERE login = NEW.user_evaluer;
+
+	IF 
+		(derniere_evaluation = 1 AND NEW.note_evaluation = 1) THEN
+		UPDATE projet.utilisateurs
+		SET etat_user = 'suspendu'
+		WHERE login = NEW.user_evaluer;
+
+		FOR tab_objet IN SELECT * FROM projet.objets o WHERE o.vendeur = NEW.user_evaluer LOOP
+			UPDATE projet.encheres 
+			SET etat = 'enchère annulée'
+			WHERE objet = tab_objet.id_objet AND (etat != 'enchère remportée' AND etat != 'enchère perdue');
+			IF
+				 tab_objet.etat != 'vendu' THEN
+					UPDATE projet.objets
+					SET etat = 'annulé'
+					WHERE vendeur = NEW.user_evaluer AND id_objet = tab_objet.id_objet;
+			END IF;
+		END LOOP;
+		UPDATE projet.encheres 
+		SET etat = 'enchère annulée'
+		WHERE acheteur = NEW.user_evaluer;
+	END IF;
+	
+	RETURN NEW;
+END;
+$$LANGUAGE plpgsql;
+
 		----------------------------
 		------APPEL TRIGGER---------
 		----------------------------
@@ -301,8 +397,11 @@ CREATE TRIGGER trigger_enchere BEFORE INSERT ON projet.encheres
 CREATE TRIGGER transTrigger BEFORE INSERT ON projet.transactions
 	FOR EACH ROW EXECUTE PROCEDURE projet.transactionTrigger();
 
-CREATE TRIGGER modObjTrigger BEFORE UPDATE on projet.objets
+CREATE TRIGGER modObjTrigger BEFORE UPDATE ON projet.objets
 	FOR EACH ROW EXECUTE PROCEDURE projet.modificationObjetTrigger();
+
+CREATE TRIGGER modMoyenneTrigger AFTER INSERT ON projet.evaluations
+	FOR EACH ROW EXECUTE PROCEDURE projet.creerEvalTrigger();
 	
 		----------------------------
 		-----------TESTS------------
@@ -315,16 +414,22 @@ SELECT projet.creerUtilisateur('C', 'C', 'C', 'C', 'C');
 SELECT projet.creerObjet('Livres', 100, null, 'A');
 SELECT projet.creerObjet('Jeux', 250, null, 'A');
 SELECT projet.creerObjet('Canapés', 500, null, 'C');
+SELECT projet.creerObjet('Ordi', 1000, null, 'A');
 
 SELECT projet.creerEnchere(120, 1, 'B');
 SELECT projet.creerEnchere(130, 1, 'C');
 SELECT projet.creerEnchere(150, 1, 'B');
 SELECT projet.creerEnchere(550, 2, 'C');
 SELECT projet.creerEnchere(600, 2, 'B');
+SELECT projet.creerEnchere(1100, 4, 'B');
+SELECT projet.creerEnchere(550, 3, 'A');
 
 SELECT projet.creerTransaction(3, 1);
 SELECT projet.creerTransaction(5, 2);
+SELECT projet.creerTransaction(6, 4);
+SELECT projet.creerEvaluation(3, 'blabla', 1, 'A');
+SELECT projet.creerEvaluation(2, 'bububu', 2, 'A');
+SELECT projet.creerEvaluation(4, 'hahaha', 4, 'A');
 
-SELECT projet.modifierObjet(3, 'C', 50, null, null);
 
 	
